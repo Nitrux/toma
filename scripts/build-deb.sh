@@ -54,7 +54,7 @@ checkinstall -D -y \
 	--pakdir=. \
 	--maintainer=uri_herrera@nxos.org \
 	--provides=toma \
-	--requires="grim,hyprland,jq,libnotify-bin,slurp,wf-recorder,wl-clipboard,xdg-user-dirs,xdg-utils" \
+	--requires="grim,hyprland,libnotify-bin,slurp,wf-recorder,wl-clipboard,xdg-utils" \
 	--nodoc \
 	--strip=no \
 	--stripso=yes \

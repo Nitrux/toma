@@ -2,7 +2,7 @@
 
 Screenshot and screen recording utility for Nitrux.
 
-Toma is a rewrite of our [Grimshot script](https://github.com/Nitrux/nitrux-desktop-settings/blob/41a8e78a2ad3c11dbf84e688088df52ac208187d/usr/bin/grimshot) and implements it in C++ and additionally now supports screen recording.
+Toma is a rewrite of [our Grimshot script](https://github.com/Nitrux/nitrux-desktop-settings/blob/41a8e78a2ad3c11dbf84e688088df52ac208187d/usr/bin/grimshot), implemented in C++, and now also supports screen recording.
 
 ## Usage
 

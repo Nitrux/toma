@@ -1,4 +1,4 @@
-# Scap
+# Toma
 Screenshot and screen recording utility for Nitrux.
 
 # Licensing
@@ -11,6 +11,6 @@ If you find problems with the contents of this repository, please create an issu
 
 ## Submitting a bug report
 
-Before submitting a bug, you should look at the [existing bug reports](https://github.com/Nitrux/scap/issues) to verify that no one has reported the bug already.
+Before submitting a bug, you should look at the [existing bug reports](https://github.com/Nitrux/toma/issues) to verify that no one has reported the bug already.
 
 ©2026 Nitrux Latinoamericana S.C.

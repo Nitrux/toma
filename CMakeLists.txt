@@ -25,7 +25,7 @@ if(NOT CMAKE_CROSSCOMPILING
     endif()
 endif()
 
-add_executable(toma src/main.cpp)
+add_executable(toma src/main.cpp src/config.cpp src/config.h)
 target_compile_features(toma PRIVATE cxx_std_23)
 set_target_properties(toma PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

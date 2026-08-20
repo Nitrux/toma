@@ -35,6 +35,8 @@
 #include <vector>
 #include <linux/fs.h>
 
+#include "config.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -693,6 +695,18 @@ fs::path getOutputDir(std::string_view xdgType, std::string_view fallbackFolder)
         throw std::system_error(error, std::format("Could not create {}", outputDirectory.string()));
     }
     return outputDirectory;
+}
+
+fs::path configuredOutputDirectory(const std::string& configured, std::string_view xdgType, std::string_view fallbackFolder) {
+    if (configured.empty())
+        return getOutputDir(xdgType, fallbackFolder);
+
+    const fs::path directory(configured);
+    std::error_code error;
+    fs::create_directories(directory, error);
+    if (error)
+        throw std::system_error(error, std::format("Could not create {}", directory.string()));
+    return directory;
 }
 
 std::string generateFilename(std::string_view prefix, std::string_view extension) {
@@ -1442,8 +1456,8 @@ bool validateCapture(const fs::path& image) {
     return width > 2 && height > 2;
 }
 
-bool captureScreenshot(CaptureMode mode) {
-    const fs::path outputDirectory = getOutputDir("PICTURES", "Pictures");
+bool captureScreenshot(CaptureMode mode, const TomaConfig& config) {
+    const fs::path outputDirectory = configuredOutputDirectory(config.screenshotsPath, "PICTURES", "Pictures");
     fs::path outputFile = uniqueOutputPath(outputDirectory, "screenshot", "png");
     const std::string geometry = getGeometry(mode);
 
@@ -1498,7 +1512,29 @@ bool captureScreenshot(CaptureMode mode) {
     return true;
 }
 
-bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
+void appendRecordingArguments(std::vector<std::string>& arguments, const TomaConfig& config) {
+    arguments.push_back("-r");
+    arguments.push_back(std::to_string(config.recordingFramerate));
+    arguments.push_back("-c");
+    arguments.push_back("libx264");
+
+    if (config.recordingPreset == "low") {
+        arguments.insert(arguments.end(), {"-p", "preset=veryfast", "-p", "crf=28"});
+    } else if (config.recordingPreset == "high") {
+        arguments.insert(arguments.end(), {"-p", "preset=slow", "-p", "crf=18"});
+    } else {
+        arguments.insert(arguments.end(), {"-p", "preset=medium", "-p", "crf=23"});
+    }
+
+    if (config.audioEnabled) {
+        if (config.audioDevice == "default")
+            arguments.push_back("--audio");
+        else
+            arguments.push_back("--audio=" + config.audioDevice);
+    }
+}
+
+bool recordScreen(CaptureMode mode, bool launchedFromValenz, const TomaConfig& config) {
     RecordingState recordingState;
     if (!recordingState.acquire()) {
         notify("low", "media-record", "Screen Capture Already Running",
@@ -1506,8 +1542,8 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
         return false;
     }
 
-    const fs::path outputDirectory = getOutputDir("VIDEOS", "Videos");
-    fs::path outputFile = uniqueOutputPath(outputDirectory, "screencast", "mp4");
+    const fs::path outputDirectory = configuredOutputDirectory(config.recordingsPath, "VIDEOS", "Videos");
+    fs::path outputFile = uniqueOutputPath(outputDirectory, "screencast", config.recordingFormat);
     const std::string geometry = getGeometry(mode);
 
     if (mode != CaptureMode::Full && geometry.empty()) {
@@ -1518,8 +1554,20 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
         return false;
     }
 
-    const fs::path temporaryFile = createTemporaryFile(outputDirectory, ".mp4");
+    const fs::path temporaryFile = createTemporaryFile(outputDirectory, "." + config.recordingFormat);
     RecordingSignalGuard signalGuard;
+    if (config.recordingCountdown > 0) {
+        notify("normal", "media-record", "Screen Capture Starting",
+               std::format("Recording starts in {} seconds.", config.recordingCountdown));
+        for (unsigned int second = 0; second < config.recordingCountdown; ++second) {
+            if (recordingStopRequested) {
+                std::error_code cleanupError;
+                fs::remove(temporaryFile, cleanupError);
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
     notify("normal", "media-record", "Screen Capture Started",
            launchedFromValenz
                ? "Recording is active. Use Stop to end the recording."
@@ -1531,6 +1579,7 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
     }
 
     std::vector<std::string> arguments{"wf-recorder", "-y"};
+    appendRecordingArguments(arguments, config);
     if (!geometry.empty()) {
         arguments.push_back("-g");
         arguments.push_back(geometry);
@@ -1542,7 +1591,7 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
     std::error_code error;
     const bool recorded = fs::is_regular_file(temporaryFile, error) && !error
         && fs::file_size(temporaryFile, error) > 0 && !error;
-    const bool saved = recorded && finalizeCapture(temporaryFile, outputFile, outputDirectory, "screencast", "mp4");
+    const bool saved = recorded && finalizeCapture(temporaryFile, outputFile, outputDirectory, "screencast", config.recordingFormat);
     if (saved) {
         const OpenAction openAction = getOpenAction("record");
         notify("normal", "video-x-generic", "Screen Capture Saved",
@@ -1617,11 +1666,12 @@ int main(int argc, char* argv[]) {
     }
 
     try {
+        const TomaConfig config = loadTomaConfig();
         if (action == "screenshot") {
-            return captureScreenshot(mode) ? 0 : 1;
+            return captureScreenshot(mode, config) ? 0 : 1;
         }
         if (action == "record") {
-            return recordScreen(mode, launchedFromValenz) ? 0 : 1;
+            return recordScreen(mode, launchedFromValenz, config) ? 0 : 1;
         }
     } catch (const std::exception& exception) {
         notify("critical", "dialog-error", "Screen Capture Failed", exception.what());

@@ -43,6 +43,8 @@ enum class CaptureMode { Full, Select, Window };
 
 volatile sig_atomic_t selectionCancelled = 0;
 volatile sig_atomic_t selectionProcessGroup = 0;
+volatile sig_atomic_t recordingProcessGroup = 0;
+volatile sig_atomic_t recordingStopRequested = 0;
 bool selectionCancelledByExistingProcess = false;
 
 std::string trim(std::string value) {
@@ -165,6 +167,206 @@ std::optional<unsigned long long> processStartTime(pid_t process) {
     return startTime;
 }
 
+struct RecordingOwner {
+    pid_t process = -1;
+    unsigned long long startTime = 0;
+};
+
+fs::path recordingStatePath() {
+    const char* runtimeEnvironment = std::getenv("XDG_RUNTIME_DIR");
+    if (runtimeEnvironment && *runtimeEnvironment) {
+        struct stat runtimeStat{};
+        if (::stat(runtimeEnvironment, &runtimeStat) == 0
+            && S_ISDIR(runtimeStat.st_mode)
+            && runtimeStat.st_uid == ::getuid()
+            && (runtimeStat.st_mode & 0022) == 0) {
+            return fs::path(runtimeEnvironment) / "toma-recording.state";
+        }
+    }
+    return std::format("/tmp/toma-recording-{}.state", static_cast<unsigned long long>(::getuid()));
+}
+
+RecordingOwner readRecordingOwner(int descriptor) {
+    std::string contents;
+    std::array<char, 64> buffer{};
+    for (;;) {
+        const ssize_t bytesRead = ::read(descriptor, buffer.data(), buffer.size());
+        if (bytesRead > 0) {
+            contents.append(buffer.data(), static_cast<std::size_t>(bytesRead));
+        } else if (bytesRead < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    std::istringstream state(contents);
+    long long process = 0;
+    RecordingOwner owner;
+    if (!(state >> process >> owner.startTime) || process <= 0 || owner.startTime == 0) {
+        throw std::runtime_error("Recording state contains invalid process information");
+    }
+    owner.process = static_cast<pid_t>(process);
+    return owner;
+}
+
+bool recordingOwnerIsAlive(const RecordingOwner& owner) {
+    errno = 0;
+    const bool processExists = ::kill(owner.process, 0) == 0 || errno == EPERM;
+    return processExists && processStartTime(owner.process) == owner.startTime;
+}
+
+class RecordingState {
+public:
+    RecordingState() = default;
+
+    bool acquire() {
+        path_ = recordingStatePath();
+        for (;;) {
+            fileDescriptor_ = ::open(path_.c_str(),
+                                     O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+            if (fileDescriptor_ >= 0) {
+                const auto startTime = processStartTime(::getpid());
+                if (!startTime) {
+                    cleanup();
+                    throw std::runtime_error("Could not read the current process start time");
+                }
+                const std::string contents = std::format("{} {}\n",
+                                                          static_cast<long long>(::getpid()), *startTime);
+                std::size_t offset = 0;
+                while (offset < contents.size()) {
+                    const ssize_t written = ::write(fileDescriptor_, contents.data() + offset,
+                                                    contents.size() - offset);
+                    if (written > 0) {
+                        offset += static_cast<std::size_t>(written);
+                    } else if (written < 0 && errno == EINTR) {
+                        continue;
+                    } else {
+                        const int error = errno;
+                        cleanup();
+                        throw std::system_error(error, std::generic_category(),
+                                                "Could not write recording state");
+                    }
+                }
+                if (::fstat(fileDescriptor_, &fileStat_) != 0) {
+                    const int error = errno;
+                    cleanup();
+                    throw std::system_error(error, std::generic_category(),
+                                            "Could not inspect recording state");
+                }
+                acquired_ = true;
+                return true;
+            }
+            if (errno != EEXIST) {
+                throw std::system_error(errno, std::generic_category(),
+                                        "Could not create recording state");
+            }
+
+            const int existing = ::open(path_.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            if (existing < 0) {
+                if (errno == ELOOP) {
+                    throw std::runtime_error("Recording state is a symlink");
+                }
+                if (errno == ENOENT) {
+                    continue;
+                }
+                throw std::system_error(errno, std::generic_category(),
+                                        "Could not inspect recording state");
+            }
+            struct stat existingStat{};
+            if (::fstat(existing, &existingStat) != 0) {
+                const int error = errno;
+                ::close(existing);
+                throw std::system_error(error, std::generic_category(),
+                                        "Could not inspect recording state");
+            }
+            if (existingStat.st_uid != ::getuid() || !S_ISREG(existingStat.st_mode)) {
+                ::close(existing);
+                throw std::runtime_error("Recording state has unsafe ownership");
+            }
+            const RecordingOwner owner = readRecordingOwner(existing);
+            ::close(existing);
+            if (recordingOwnerIsAlive(owner)) {
+                return false;
+            }
+            if (::unlink(path_.c_str()) != 0 && errno != ENOENT) {
+                throw std::system_error(errno, std::generic_category(),
+                                        "Could not remove stale recording state");
+            }
+        }
+    }
+
+    static bool requestStop() {
+        const fs::path path = recordingStatePath();
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (descriptor < 0) {
+            if (errno == ENOENT) {
+                return false;
+            }
+            if (errno == ELOOP) {
+                throw std::runtime_error("Recording state is a symlink");
+            }
+            throw std::system_error(errno, std::generic_category(),
+                                    "Could not inspect recording state");
+        }
+        struct stat stateStat{};
+        if (::fstat(descriptor, &stateStat) != 0) {
+            const int error = errno;
+            ::close(descriptor);
+            throw std::system_error(error, std::generic_category(),
+                                    "Could not inspect recording state");
+        }
+        if (stateStat.st_uid != ::getuid() || !S_ISREG(stateStat.st_mode)) {
+            ::close(descriptor);
+            throw std::runtime_error("Recording state has unsafe ownership");
+        }
+        const RecordingOwner owner = readRecordingOwner(descriptor);
+        ::close(descriptor);
+        if (recordingOwnerIsAlive(owner)) {
+            if (::kill(owner.process, SIGINT) == 0) {
+                return true;
+            }
+            if (errno != ESRCH) {
+                throw std::system_error(errno, std::generic_category(),
+                                        "Could not stop recording");
+            }
+        }
+        ::unlink(path.c_str());
+        return false;
+    }
+
+    ~RecordingState() {
+        if (fileDescriptor_ >= 0) {
+            if (acquired_) {
+                struct stat currentStat{};
+                if (::stat(path_.c_str(), &currentStat) == 0
+                    && currentStat.st_dev == fileStat_.st_dev
+                    && currentStat.st_ino == fileStat_.st_ino) {
+                    ::unlink(path_.c_str());
+                }
+            }
+            ::close(fileDescriptor_);
+        }
+    }
+
+    RecordingState(const RecordingState&) = delete;
+    RecordingState& operator=(const RecordingState&) = delete;
+
+private:
+    void cleanup() {
+        if (fileDescriptor_ >= 0) {
+            ::close(fileDescriptor_);
+            fileDescriptor_ = -1;
+        }
+        ::unlink(path_.c_str());
+    }
+
+    fs::path path_;
+    int fileDescriptor_ = -1;
+    bool acquired_ = false;
+    struct stat fileStat_{};
+};
+
 void terminateProcess(pid_t process, bool processGroup) {
     if (process > 0) {
         ::kill(processGroup ? -process : process, SIGTERM);
@@ -259,6 +461,7 @@ ProcessResult runProcess(const std::vector<std::string>& arguments, const Proces
     if (options.processGroup) {
         ::setpgid(process, process);
         selectionProcessGroup = static_cast<sig_atomic_t>(process);
+        recordingProcessGroup = static_cast<sig_atomic_t>(process);
     }
 
     struct sigaction oldPipeAction{};
@@ -315,6 +518,7 @@ ProcessResult runProcess(const std::vector<std::string>& arguments, const Proces
 
     if (options.processGroup) {
         selectionProcessGroup = 0;
+        recordingProcessGroup = 0;
     }
     result.outputLimitExceeded = outputLimitReached;
     return result;
@@ -332,6 +536,19 @@ OpenAction getOpenAction(std::string_view captureType) {
         return {std::format("Open {}", isScreenshot ? "Pix" : "Clip"), executable->string()};
     }
     return {"Open", findExecutable("xdg-open").value_or(fs::path("xdg-open")).string()};
+}
+
+std::string shellQuote(std::string_view value) {
+    std::string quoted{"'"};
+    for (const char character : value) {
+        if (character == char(39)) {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(character);
+        }
+    }
+    quoted.push_back(char(39));
+    return quoted;
 }
 
 void spawnNotificationAction(const std::vector<std::string>& notificationArguments,
@@ -362,11 +579,19 @@ void spawnNotificationAction(const std::vector<std::string>& notificationArgumen
         ::close(nullDescriptor);
     }
 
-    const ProcessResult notification = runProcess(notificationArguments, ProcessOptions{true, false, true});
-    if (processSucceeded(notification) && trim(std::move(notification.output)) == "default") {
-        runProcess({std::move(opener), file.string()}, {false, false, true});
+    std::string command = "notify-send";
+    for (std::size_t index = 1; index < notificationArguments.size(); ++index) {
+        command += " ";
+        command += shellQuote(notificationArguments[index]);
     }
-    _exit(0);
+    command += " | grep -qx default && exec ";
+    command += shellQuote(opener);
+    command += " ";
+    command += shellQuote(file.string());
+
+    const fs::path shell = findExecutable("sh").value_or(fs::path("/bin/sh"));
+    ::execl(shell.c_str(), shell.c_str(), "-c", command.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
 }
 
 void notify(std::string_view urgency, std::string_view icon, std::string_view title,
@@ -544,6 +769,54 @@ void handleSelectionSignal(int) {
         ::kill(-processGroup, SIGTERM);
     }
 }
+
+void handleRecordingSignal(int) {
+    recordingStopRequested = 1;
+    const pid_t processGroup = static_cast<pid_t>(recordingProcessGroup);
+    if (processGroup > 0) {
+        ::kill(-processGroup, SIGINT);
+    }
+}
+
+class RecordingSignalGuard {
+public:
+    RecordingSignalGuard() {
+        recordingStopRequested = 0;
+        struct sigaction action{};
+        action.sa_handler = handleRecordingSignal;
+        sigemptyset(&action.sa_mask);
+
+        if (::sigaction(SIGINT, &action, &oldInt_) != 0) {
+            throw std::system_error(errno, std::generic_category(), "Could not install recording stop handler");
+        }
+        intInstalled_ = true;
+        if (::sigaction(SIGTERM, &action, &oldTerm_) != 0) {
+            ::sigaction(SIGINT, &oldInt_, nullptr);
+            intInstalled_ = false;
+            throw std::system_error(errno, std::generic_category(), "Could not install recording stop handler");
+        }
+        termInstalled_ = true;
+    }
+
+    ~RecordingSignalGuard() {
+        if (termInstalled_) {
+            ::sigaction(SIGTERM, &oldTerm_, nullptr);
+        }
+        if (intInstalled_) {
+            ::sigaction(SIGINT, &oldInt_, nullptr);
+        }
+        recordingProcessGroup = 0;
+    }
+
+    RecordingSignalGuard(const RecordingSignalGuard&) = delete;
+    RecordingSignalGuard& operator=(const RecordingSignalGuard&) = delete;
+
+private:
+    struct sigaction oldTerm_{};
+    struct sigaction oldInt_{};
+    bool termInstalled_ = false;
+    bool intInstalled_ = false;
+};
 
 class SelectionSignalGuard {
 public:
@@ -1225,7 +1498,14 @@ bool captureScreenshot(CaptureMode mode) {
     return true;
 }
 
-bool recordScreen(CaptureMode mode) {
+bool recordScreen(CaptureMode mode, bool launchedFromValenz) {
+    RecordingState recordingState;
+    if (!recordingState.acquire()) {
+        notify("low", "media-record", "Screen Capture Already Running",
+               "Stop the active recording before starting another one.");
+        return false;
+    }
+
     const fs::path outputDirectory = getOutputDir("VIDEOS", "Videos");
     fs::path outputFile = uniqueOutputPath(outputDirectory, "screencast", "mp4");
     const std::string geometry = getGeometry(mode);
@@ -1239,17 +1519,25 @@ bool recordScreen(CaptureMode mode) {
     }
 
     const fs::path temporaryFile = createTemporaryFile(outputDirectory, ".mp4");
+    RecordingSignalGuard signalGuard;
     notify("normal", "media-record", "Screen Capture Started",
-           "Press Ctrl+C in the terminal to stop.");
+           launchedFromValenz
+               ? "Recording is active. Use Stop to end the recording."
+               : "Recording is active. To stop recording, run: toma record -stop.");
+    if (recordingStopRequested) {
+        std::error_code cleanupError;
+        fs::remove(temporaryFile, cleanupError);
+        return false;
+    }
 
-    std::vector<std::string> arguments{"wf-recorder"};
+    std::vector<std::string> arguments{"wf-recorder", "-y"};
     if (!geometry.empty()) {
         arguments.push_back("-g");
         arguments.push_back(geometry);
     }
     arguments.push_back("-f");
     arguments.push_back(temporaryFile.string());
-    runProcess(arguments, {false, false, true});
+    runProcess(arguments, {false, true, false});
 
     std::error_code error;
     const bool recorded = fs::is_regular_file(temporaryFile, error) && !error
@@ -1269,11 +1557,22 @@ bool recordScreen(CaptureMode mode) {
     return saved;
 }
 
+bool stopRecording() {
+    if (RecordingState::requestStop()) {
+        notify("normal", "media-record", "Stopping Screen Capture",
+               "Finishing and saving the recording.");
+        return true;
+    }
+    notify("low", "dialog-information", "No Active Recording", "There is no screen recording to stop.");
+    return false;
+}
+
 void printUsage(const char* programName) {
     std::cerr << "Usage: " << programName << " <action> <mode>\n"
               << "Actions:\n"
               << "  screenshot   Take a static screenshot\n"
               << "  record       Record a video of the screen\n"
+              << "               Use record -stop to finish the active recording\n"
               << "Modes:\n"
               << "  -f           Full screen\n"
               << "  -s           Select region\n"
@@ -1283,13 +1582,28 @@ void printUsage(const char* programName) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
+    if (argc != 3 && argc != 4) {
         printUsage(argv[0]);
         return 2;
     }
 
     const std::string_view action(argv[1]);
     const std::string_view flag(argv[2]);
+    const bool launchedFromValenz = argc == 4 && std::string_view(argv[3]) == "--source=valenz";
+    if (argc == 4 && !launchedFromValenz) {
+        printUsage(argv[0]);
+        return 2;
+    }
+    if (action == "record" && flag == "-stop") {
+        try {
+            return stopRecording() ? 0 : 1;
+        } catch (const std::exception& exception) {
+            notify("critical", "dialog-error", "Screen Capture Failed", exception.what());
+            std::cerr << "toma: " << exception.what() << '\n';
+            return 1;
+        }
+    }
+
     CaptureMode mode;
     if (flag == "-f") {
         mode = CaptureMode::Full;
@@ -1307,7 +1621,7 @@ int main(int argc, char* argv[]) {
             return captureScreenshot(mode) ? 0 : 1;
         }
         if (action == "record") {
-            return recordScreen(mode) ? 0 : 1;
+            return recordScreen(mode, launchedFromValenz) ? 0 : 1;
         }
     } catch (const std::exception& exception) {
         notify("critical", "dialog-error", "Screen Capture Failed", exception.what());

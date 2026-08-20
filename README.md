@@ -12,6 +12,7 @@ toma screenshot -s   # Select a screenshot region
 toma screenshot -w   # Select a window for the screenshot
 toma record -f       # Full-screen recording
 toma record -s       # Select a recording region
+toma record -stop    # Stop the active recording
 toma record -w       # Select a window for the recording
 ```
 

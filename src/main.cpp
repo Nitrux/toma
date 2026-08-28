@@ -1535,13 +1535,6 @@ void appendRecordingArguments(std::vector<std::string>& arguments, const TomaCon
 }
 
 bool recordScreen(CaptureMode mode, bool launchedFromValenz, const TomaConfig& config) {
-    RecordingState recordingState;
-    if (!recordingState.acquire()) {
-        notify("low", "media-record", "Screen Capture Already Running",
-               "Stop the active recording before starting another one.");
-        return false;
-    }
-
     const fs::path outputDirectory = configuredOutputDirectory(config.recordingsPath, "VIDEOS", "Videos");
     fs::path outputFile = uniqueOutputPath(outputDirectory, "screencast", config.recordingFormat);
     const std::string geometry = getGeometry(mode);
@@ -1551,6 +1544,13 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz, const TomaConfig& c
             return false;
         }
         notify("low", "dialog-information", "Screen Capture Cancelled", "No selection made.");
+        return false;
+    }
+
+    RecordingState recordingState;
+    if (!recordingState.acquire()) {
+        notify("low", "media-record", "Screen Capture Already Running",
+               "Stop the active recording before starting another one.");
         return false;
     }
 
@@ -1577,6 +1577,9 @@ bool recordScreen(CaptureMode mode, bool launchedFromValenz, const TomaConfig& c
         fs::remove(temporaryFile, cleanupError);
         return false;
     }
+
+    if (launchedFromValenz)
+        std::cout << "TOMA_RECORDING_STARTED\n" << std::flush;
 
     std::vector<std::string> arguments{"wf-recorder", "-y"};
     appendRecordingArguments(arguments, config);

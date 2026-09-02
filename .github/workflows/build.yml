@@ -44,10 +44,11 @@ jobs:
           EOF
           apt update && apt -o Dpkg::Options::=--force-overwrite full-upgrade -y
       - name: Setup amd64 environment
-        run: apt install -y build-essential checkinstall cmake dpkg-dev git gnupg ruby-full
+        run: apt install -y devscripts equivs git gnupg lintian ruby-full sudo
       - run: gem install package_cloud
       - uses: actions/checkout@v4
-      - run: ./scripts/install-build-deps.sh
+      - name: Install build dependencies
+        run: ./scripts/install-build-deps.sh
       - run: ./scripts/build-deb.sh
         env:
           PACKAGE_VERSION: ${{ inputs.packageVersion }}
@@ -86,10 +87,11 @@ jobs:
           EOF
           apt update && apt -o Dpkg::Options::=--force-overwrite full-upgrade -y
       - name: Setup arm64 environment
-        run: apt install -y build-essential checkinstall cmake dpkg-dev git gnupg ruby-full
+        run: apt install -y devscripts equivs git gnupg lintian ruby-full sudo
       - run: gem install package_cloud
       - uses: actions/checkout@v4
-      - run: ./scripts/install-build-deps.sh
+      - name: Install build dependencies
+        run: ./scripts/install-build-deps.sh
       - run: ./scripts/build-deb.sh
         env:
           PACKAGE_VERSION: ${{ inputs.packageVersion }}

@@ -1425,7 +1425,7 @@ std::string getGeometry(CaptureMode mode) {
         return {};
     }
     const std::string input = windowSelectionInput(clientsProcess.output, activeWorkspace(workspaceProcess.output));
-    return execSelection({"slurp"}, input);
+    return execSelection({"slurp", "-r"}, input);
 }
 
 bool validateCapture(const fs::path& image) {

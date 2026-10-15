@@ -11,12 +11,17 @@ set -e
 
 # -- Compile Source
 
+PACKAGE_VERSION="${PACKAGE_VERSION:-0.0.1}"
+TARGET_ARCH="${TARGET_ARCH:-$(dpkg --print-architecture)}"
+
 mkdir -p build && cd build
 
 HOST_MULTIARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 
 cmake \
 	-DCMAKE_INSTALL_PREFIX=/usr \
+	-DCPACK_PACKAGE_VERSION="${PACKAGE_VERSION}" \
+	-DCPACK_DEBIAN_PACKAGE_ARCHITECTURE="${TARGET_ARCH}" \
 	-DENABLE_BSYMBOLICFUNCTIONS=OFF \
 	-DQUICK_COMPILER=ON \
 	-DCMAKE_BUILD_TYPE=Release \
@@ -33,30 +38,6 @@ make -j"$(nproc)"
 make install
 
 
-# -- Run checkinstall and Build Debian Package
+# -- Build the Debian package with CPack.
 
->> description-pak printf "%s\n" \
-	'Toma - screenshot and screen recording utility for Nitrux.' \
-	'' \
-	'Capture screenshots and record videos on the Nitrux desktop.' \
-	''
-
-checkinstall -D -y \
-	--install=no \
-	--fstrans=yes \
-	--pkgname=toma \
-	--pkgversion="$PACKAGE_VERSION" \
-	--pkgarch="$(dpkg --print-architecture)" \
-	--pkgrelease="1" \
-	--pkglicense=BSD-3-Clause \
-	--pkggroup=utils \
-	--pkgsource=toma \
-	--pakdir=. \
-	--maintainer=uri_herrera@nxos.org \
-	--provides=toma \
-	--requires="grim,hyprland,libnotify-bin,slurp,wf-recorder,wl-clipboard,xdg-utils" \
-	--nodoc \
-	--strip=no \
-	--stripso=yes \
-	--reset-uids=yes \
-	--deldesc=yes
+cpack -G DEB -C Release

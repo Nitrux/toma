@@ -33,6 +33,18 @@ set_target_properties(toma PROPERTIES
 install(TARGETS toma
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
+set(CPACK_PACKAGE_NAME "toma")
+set(CPACK_DEBIAN_PACKAGE_NAME "toma")
+set(CPACK_PACKAGE_VENDOR "Nitrux Latinoamericana S.C.")
+set(CPACK_PACKAGE_CONTACT "uri_herrera@nxos.org")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Toma - screenshot and screen recording utility for Nitrux")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "uri_herrera@nxos.org")
+set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "grim, hyprland, libnotify-bin, slurp, wf-recorder, wl-clipboard, xdg-utils")
+set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+include(CPack)
+
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake_uninstall.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake"
